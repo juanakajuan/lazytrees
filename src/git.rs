@@ -143,6 +143,11 @@ pub fn prune_worktrees(repo: &Repo) -> AppResult<()> {
     run_git(repo, ["worktree", "prune"])
 }
 
+pub fn remove_worktree(repo: &Repo, path: &Path) -> AppResult<()> {
+    let path_text = path.to_string_lossy().into_owned();
+    run_git(repo, ["worktree", "remove", path_text.as_str()])
+}
+
 pub fn launch_agent(command: &str, path: &Path) -> AppResult<()> {
     let status = Command::new("sh")
         .arg("-lc")

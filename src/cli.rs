@@ -5,7 +5,8 @@ use crate::error::{AppError, AppResult};
 use crate::git::{
     LaunchOptions, NewOptions, Repo, build_new_worktree_plan, create_worktree,
     default_agent_command, format_worktree, launch_agent, list_worktrees as git_list_worktrees,
-    prune_worktrees as git_prune_worktrees, shell_quote_path,
+    prune_worktrees as git_prune_worktrees, remove_worktree as git_remove_worktree,
+    shell_quote_path,
 };
 
 pub fn is_help_request(args: &[String]) -> bool {
@@ -14,26 +15,33 @@ pub fn is_help_request(args: &[String]) -> bool {
 
 pub fn print_help() {
     println!(
-        "lazytrees\n\n\
-Interactive TUI for Git worktrees, with scriptable CLI commands.\n\n\
-Usage:\n\
-  lazytrees                         open the TUI\n\
-  lazytrees tui                     open the TUI\n\
-  lazytrees new [branch] [options]  create a worktree\n\
-  lazytrees list                    list worktrees\n\
-  lazytrees launch [options]        launch an agent in a worktree\n\
-  lazytrees prune                   prune stale worktree metadata\n\n\
-Options for new:\n\
-  --base <ref>        base ref for a new branch, defaults to HEAD\n\
-  --path <path>       worktree path, defaults to ../<repo>-worktrees/<branch>\n\
-  --agent <command>   command to run inside the new worktree\n\n\
-Options for launch:\n\
-  --path <path>       existing worktree path\n\
-  --agent <command>   command to run, defaults to WT_AGENT_CMD or opencode\n\n\
-Examples:\n\
-  lazytrees\n\
-  lazytrees new feature/search --base main --agent opencode\n\
-  lazytrees launch --agent \"opencode\"\n"
+        "{}",
+        concat!(
+            "lazytrees\n\n",
+            "Interactive TUI for Git worktrees, with scriptable CLI commands.\n\n",
+            "Usage:\n",
+            "  lazytrees                         open the TUI\n",
+            "  lazytrees tui                     open the TUI\n",
+            "  lazytrees new [branch] [options]  create a worktree\n",
+            "  lazytrees list                    list worktrees\n",
+            "  lazytrees launch [options]        launch an agent in a worktree\n",
+            "  lazytrees remove [path]           remove a worktree\n",
+            "  lazytrees prune                   prune stale worktree metadata\n\n",
+            "Options for new:\n",
+            "  --base <ref>        base ref for a new branch, defaults to HEAD\n",
+            "  --path <path>       worktree path, defaults to ../<repo>-worktrees/<branch>\n",
+            "  --agent <command>   command to run inside the new worktree\n\n",
+            "Options for launch:\n",
+            "  --path <path>       existing worktree path\n",
+            "  --agent <command>   command to run, defaults to WT_AGENT_CMD or opencode\n\n",
+            "Options for remove:\n",
+            "  --path <path>       existing worktree path\n\n",
+            "Examples:\n",
+            "  lazytrees\n",
+            "  lazytrees new feature/search --base main --agent opencode\n",
+            "  lazytrees launch --agent \"opencode\"\n",
+            "  lazytrees remove ../repo-worktrees/feature-search\n"
+        )
     );
 }
 
@@ -142,6 +150,27 @@ pub fn launch_worktree(repo: &Repo, args: &[String]) -> AppResult<()> {
 pub fn prune_worktrees(repo: &Repo) -> AppResult<()> {
     git_prune_worktrees(repo)?;
     println!("pruned stale worktree metadata");
+    Ok(())
+}
+
+pub fn remove_worktree(repo: &Repo, args: &[String]) -> AppResult<()> {
+    let options = parse_remove_options(args)?;
+    let prompt_missing = options.path.is_none();
+    let path = match options.path {
+        Some(path) => path,
+        None => select_worktree(repo)?,
+    };
+
+    if prompt_missing {
+        let label = format!("Remove worktree {}?", path.display());
+        if !confirm(&label, false)? {
+            println!("remove cancelled");
+            return Ok(());
+        }
+    }
+
+    git_remove_worktree(repo, &path)?;
+    println!("removed: {}", path.display());
     Ok(())
 }
 
@@ -302,6 +331,41 @@ fn parse_launch_options(args: &[String]) -> AppResult<LaunchOptions> {
     Ok(options)
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RemoveOptions {
+    path: Option<PathBuf>,
+}
+
+fn parse_remove_options(args: &[String]) -> AppResult<RemoveOptions> {
+    let mut options = RemoveOptions::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--path" => {
+                index += 1;
+                options.path = Some(PathBuf::from(required_arg(args, index, "--path")?));
+            }
+            argument if argument.starts_with("--path=") => {
+                options.path = Some(PathBuf::from(&argument["--path=".len()..]));
+            }
+            argument if argument.starts_with('-') => {
+                return Err(AppError::new(format!("unknown option `{argument}`")));
+            }
+            path => {
+                if options.path.is_some() {
+                    return Err(AppError::new(format!("unexpected extra argument `{path}`")));
+                }
+                options.path = Some(PathBuf::from(path));
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(options)
+}
+
 fn required_arg<'a>(args: &'a [String], index: usize, option: &str) -> AppResult<&'a str> {
     args.get(index)
         .map(String::as_str)
@@ -348,5 +412,17 @@ mod tests {
             Some(std::path::Path::new("../repo-worktrees/feat"))
         );
         assert_eq!(options.agent_command.as_deref(), Some("opencode"));
+    }
+
+    #[test]
+    fn parse_remove_options_accepts_path_positionally() {
+        let args = vec!["../repo-worktrees/feat".to_owned()];
+
+        let options = parse_remove_options(&args).expect("options parse");
+
+        assert_eq!(
+            options.path.as_deref(),
+            Some(std::path::Path::new("../repo-worktrees/feat"))
+        );
     }
 }

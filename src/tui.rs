@@ -19,7 +19,7 @@ use ratatui::widgets::{
 use crate::error::AppResult;
 use crate::git::{
     NewOptions, Repo, Worktree, build_new_worktree_plan, create_worktree, default_agent_command,
-    default_worktree_path, launch_agent, list_worktrees, prune_worktrees,
+    default_worktree_path, launch_agent, list_worktrees, prune_worktrees, remove_worktree,
 };
 
 type TerminalBackend = Terminal<CrosstermBackend<io::Stdout>>;
@@ -174,6 +174,10 @@ enum Mode {
         base: String,
         input: String,
     },
+    ConfirmRemove {
+        path: PathBuf,
+        branch: String,
+    },
     ConfirmPrune,
 }
 
@@ -286,6 +290,9 @@ impl<'repo> TuiApp<'repo> {
                     Ok(None)
                 }
             },
+            Mode::ConfirmRemove { path, branch } => {
+                self.handle_remove_confirmation(key, path, branch)
+            }
             Mode::ConfirmPrune => self.handle_prune_confirmation(key),
         }
     }
@@ -311,6 +318,7 @@ impl<'repo> TuiApp<'repo> {
             KeyCode::Char('p') => {
                 self.mode = Mode::ConfirmPrune;
             }
+            KeyCode::Char('d') => self.confirm_remove_selected(),
             KeyCode::Enter | KeyCode::Char('o') => {
                 if let Some(worktree) = self.selected_worktree() {
                     return Ok(Some(TuiAction::Launch(worktree.path.clone())));
@@ -321,6 +329,31 @@ impl<'repo> TuiApp<'repo> {
         }
 
         Ok(None)
+    }
+
+    fn confirm_remove_selected(&mut self) {
+        let Some((path, branch, prunable)) = self.selected_worktree().map(|worktree| {
+            (
+                worktree.path.clone(),
+                worktree.branch_label().to_owned(),
+                worktree.prunable,
+            )
+        }) else {
+            self.set_error("no worktree selected");
+            return;
+        };
+
+        if prunable {
+            self.set_error("use prune for stale worktree metadata");
+            return;
+        }
+
+        if path == self.repo.root {
+            self.set_error("cannot remove current worktree");
+            return;
+        }
+
+        self.mode = Mode::ConfirmRemove { path, branch };
     }
 
     fn submit_branch(&mut self, branch: String) -> AppResult<Option<TuiAction>> {
@@ -368,6 +401,34 @@ impl<'repo> TuiApp<'repo> {
         self.select_path(&plan.path);
         self.mode = Mode::Browse;
         self.set_info(format!("created {}", plan.path.display()));
+
+        Ok(None)
+    }
+
+    fn handle_remove_confirmation(
+        &mut self,
+        key: KeyEvent,
+        path: PathBuf,
+        branch: String,
+    ) -> AppResult<Option<TuiAction>> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => match remove_worktree(self.repo, &path) {
+                Ok(()) => {
+                    self.refresh()?;
+                    self.mode = Mode::Browse;
+                    self.set_info(format!("removed {}", path.display()));
+                }
+                Err(error) => {
+                    self.mode = Mode::Browse;
+                    self.set_error(error.to_string());
+                }
+            },
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.mode = Mode::Browse;
+                self.set_info("remove cancelled");
+            }
+            _ => self.mode = Mode::ConfirmRemove { path, branch },
+        }
 
         Ok(None)
     }
@@ -487,7 +548,11 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            if count == 1 { " worktree " } else { " worktrees " },
+            if count == 1 {
+                " worktree "
+            } else {
+                " worktrees "
+            },
             Style::default().fg(theme::MUTED),
         ),
         Span::styled("│ ", Style::default().fg(theme::FAINT)),
@@ -586,7 +651,12 @@ fn render_worktree_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Tui
                 &worktree.path.display().to_string(),
                 theme::TEXT,
             ),
-            detail_row("", "state", &worktree_state(worktree), state_color(worktree)),
+            detail_row(
+                "",
+                "state",
+                &worktree_state(worktree),
+                state_color(worktree),
+            ),
             Line::from(""),
             Line::from(Span::styled(
                 "─".repeat(area.width.saturating_sub(4) as usize),
@@ -660,6 +730,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
     ];
     status_line.extend(hint("↵", "open"));
     status_line.extend(hint("n", "new"));
+    status_line.extend(hint("d", "remove"));
     status_line.extend(hint("p", "prune"));
     status_line.extend(hint("r", "refresh"));
     status_line.extend(hint("q", "quit"));
@@ -703,6 +774,60 @@ fn render_mode(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
                 Some(&default_path.display().to_string()),
             );
         }
+        Mode::ConfirmRemove { path, branch } => {
+            let popup = centered_rect(64, 9, area);
+            render_shadow(frame, popup);
+            frame.render_widget(Clear, popup);
+            let lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Remove selected worktree?",
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(vec![
+                    Span::styled("branch  ", Style::default().fg(theme::FAINT)),
+                    Span::styled(branch.to_owned(), Style::default().fg(theme::TEXT)),
+                ]),
+                Line::from(vec![
+                    Span::styled("path    ", Style::default().fg(theme::FAINT)),
+                    Span::styled(
+                        path.display().to_string(),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        "y",
+                        Style::default()
+                            .fg(theme::GOOD)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" confirm    ", Style::default().fg(theme::MUTED)),
+                    Span::styled(
+                        "n",
+                        Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" cancel", Style::default().fg(theme::MUTED)),
+                ]),
+            ];
+            let paragraph = Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(theme::BAD))
+                        .title(Span::styled(
+                            " Confirm remove ",
+                            Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
+                        )),
+                )
+                .wrap(Wrap { trim: false });
+            frame.render_widget(paragraph, popup);
+        }
         Mode::ConfirmPrune => {
             let popup = centered_rect(56, 7, area);
             render_shadow(frame, popup);
@@ -719,7 +844,9 @@ fn render_mode(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
                 Line::from(vec![
                     Span::styled(
                         "y",
-                        Style::default().fg(theme::GOOD).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme::GOOD)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" confirm    ", Style::default().fg(theme::MUTED)),
                     Span::styled(
