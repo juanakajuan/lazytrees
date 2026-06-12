@@ -1,8 +1,9 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 use crate::error::{AppError, AppResult};
 
@@ -27,13 +28,11 @@ pub struct NewOptions {
     pub branch: Option<String>,
     pub base: Option<String>,
     pub path: Option<PathBuf>,
-    pub agent_command: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct LaunchOptions {
+pub struct OpenOptions {
     pub path: Option<PathBuf>,
-    pub agent_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,24 +147,39 @@ pub fn remove_worktree(repo: &Repo, path: &Path) -> AppResult<()> {
     run_git(repo, ["worktree", "remove", path_text.as_str()])
 }
 
-pub fn launch_agent(command: &str, path: &Path) -> AppResult<()> {
-    let status = Command::new("sh")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(path)
-        .status()?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::new(format!(
-            "agent command exited with status {status}"
-        )))
+pub fn open_tmux_session(path: &Path) -> AppResult<()> {
+    if !path.is_dir() {
+        return Err(AppError::new(format!(
+            "not a directory: {}",
+            path.display()
+        )));
     }
-}
 
-pub fn default_agent_command() -> String {
-    env::var("WT_AGENT_CMD").unwrap_or_else(|_| "opencode".to_owned())
+    let session = available_tmux_session_name(path)?;
+    if env::var_os("TMUX").is_some() {
+        let mut create = Command::new("tmux");
+        create
+            .args(["new-session", "-d", "-s"])
+            .arg(&session)
+            .arg("-c")
+            .arg(path);
+        run_tmux(&mut create, "tmux new-session")?;
+
+        let target = exact_tmux_target(&session);
+        let mut switch = Command::new("tmux");
+        switch.args(["switch-client", "-t"]).arg(target);
+        run_tmux(&mut switch, "tmux switch-client")?;
+    } else {
+        let mut create = Command::new("tmux");
+        create
+            .args(["new-session", "-s"])
+            .arg(&session)
+            .arg("-c")
+            .arg(path);
+        run_tmux(&mut create, "tmux new-session")?;
+    }
+
+    Ok(())
 }
 
 pub fn default_worktree_path(repo: &Repo, branch: &str) -> PathBuf {
@@ -177,17 +191,6 @@ pub fn format_worktree(worktree: &Worktree) -> String {
     let branch = worktree.branch_label();
     let prunable = if worktree.prunable { " prunable" } else { "" };
     format!("{}  [{}{}]", worktree.path.display(), branch, prunable)
-}
-
-pub fn shell_quote_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if text.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '+')
-    }) {
-        return text.into_owned();
-    }
-
-    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 impl Worktree {
@@ -307,6 +310,95 @@ fn absolute_path(path: &Path) -> AppResult<PathBuf> {
     }
 }
 
+fn available_tmux_session_name(path: &Path) -> AppResult<String> {
+    let base = tmux_session_name(path);
+    if !tmux_session_exists(&base)? {
+        return Ok(base);
+    }
+
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !tmux_session_exists(&candidate)? {
+            return Ok(candidate);
+        }
+        suffix += 1;
+    }
+}
+
+fn tmux_session_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("worktree");
+    format!("lazytrees-{}", sanitize_tmux_session_name(name))
+}
+
+fn sanitize_tmux_session_name(name: &str) -> String {
+    let mut sanitized = String::new();
+    let mut last_was_dash = false;
+
+    for character in name.chars() {
+        let replacement = if character.is_ascii_alphanumeric() {
+            character.to_ascii_lowercase()
+        } else if matches!(character, '-' | '_') {
+            character
+        } else {
+            '-'
+        };
+
+        if replacement == '-' && last_was_dash {
+            continue;
+        }
+
+        last_was_dash = replacement == '-';
+        sanitized.push(replacement);
+    }
+
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "worktree".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn tmux_session_exists(name: &str) -> AppResult<bool> {
+    let target = exact_tmux_target(name);
+    let status = Command::new("tmux")
+        .args(["has-session", "-t"])
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(tmux_io_error)?;
+
+    Ok(status.success())
+}
+
+fn exact_tmux_target(name: &str) -> String {
+    format!("={name}")
+}
+
+fn run_tmux(command: &mut Command, description: &str) -> AppResult<()> {
+    let status = command.status().map_err(tmux_io_error)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::new(format!(
+            "{description} failed with status {status}"
+        )))
+    }
+}
+
+fn tmux_io_error(error: io::Error) -> AppError {
+    if error.kind() == io::ErrorKind::NotFound {
+        AppError::new("tmux is required but was not found in PATH")
+    } else {
+        AppError::from(error)
+    }
+}
+
 fn branch_to_dir_name(branch: &str) -> String {
     branch
         .chars()
@@ -384,6 +476,15 @@ mod tests {
             branch_to_dir_name("bugfix\\windows:path"),
             "bugfix-windows-path"
         );
+    }
+
+    #[test]
+    fn tmux_session_name_uses_sanitized_path_basename() {
+        assert_eq!(
+            tmux_session_name(Path::new("/repo-worktrees/Feat Search!")),
+            "lazytrees-feat-search"
+        );
+        assert_eq!(tmux_session_name(Path::new("/")), "lazytrees-worktree");
     }
 
     #[test]

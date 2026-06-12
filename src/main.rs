@@ -29,7 +29,7 @@ fn run() -> AppResult<()> {
         None | Some("tui") => tui::run(&repo),
         Some("new") => cli::new_worktree(&repo, &args[1..]),
         Some("list") => cli::list_worktrees(&repo),
-        Some("launch") | Some("open") => cli::launch_worktree(&repo, &args[1..]),
+        Some("open") => cli::open_worktree(&repo, &args[1..]),
         Some("remove") | Some("rm") => cli::remove_worktree(&repo, &args[1..]),
         Some("prune") => cli::prune_worktrees(&repo),
         Some("help") => {

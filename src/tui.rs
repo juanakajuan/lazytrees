@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,8 +18,8 @@ use ratatui::widgets::{
 
 use crate::error::AppResult;
 use crate::git::{
-    NewOptions, Repo, Worktree, build_new_worktree_plan, create_worktree, default_agent_command,
-    default_worktree_path, launch_agent, list_worktrees, prune_worktrees, remove_worktree,
+    NewOptions, Repo, Worktree, build_new_worktree_plan, create_worktree, default_worktree_path,
+    list_worktrees, open_tmux_session, prune_worktrees, remove_worktree,
 };
 
 type TerminalBackend = Terminal<CrosstermBackend<io::Stdout>>;
@@ -105,11 +105,11 @@ fn run_loop(repo: &Repo, terminal: &mut TerminalBackend) -> AppResult<()> {
         }
 
         match app.handle_key(key)? {
-            Some(TuiAction::Launch(path)) => {
-                let result = launch_from_tui(terminal, &path);
+            Some(TuiAction::Open(path)) => {
+                let result = open_from_tui(terminal, &path);
                 app.refresh()?;
                 match result {
-                    Ok(()) => app.set_info(format!("agent exited: {}", path.display())),
+                    Ok(()) => app.set_info(format!("tmux session opened: {}", path.display())),
                     Err(error) => app.set_error(error.to_string()),
                 }
             }
@@ -125,19 +125,13 @@ fn restore_terminal(terminal: &mut TerminalBackend) -> AppResult<()> {
     Ok(())
 }
 
-fn launch_from_tui(terminal: &mut TerminalBackend, path: &Path) -> AppResult<()> {
+fn open_from_tui(terminal: &mut TerminalBackend, path: &Path) -> AppResult<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    let command = default_agent_command();
-    println!("lazytrees launching `{command}` in {}", path.display());
-    let result = launch_agent(&command, path);
-    println!();
-    println!("Press Enter to return to lazytrees.");
-
-    let mut buffer = [0_u8; 1];
-    let _ = io::stdin().read(&mut buffer);
+    println!("lazytrees opening tmux session in {}", path.display());
+    let result = open_tmux_session(path);
 
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     enable_raw_mode()?;
@@ -156,7 +150,7 @@ struct TuiApp<'repo> {
 }
 
 enum TuiAction {
-    Launch(PathBuf),
+    Open(PathBuf),
 }
 
 enum Mode {
@@ -335,7 +329,7 @@ impl<'repo> TuiApp<'repo> {
             KeyCode::Char('d') => self.confirm_remove_selected(),
             KeyCode::Enter | KeyCode::Char('o') => {
                 if let Some(worktree) = self.selected_worktree() {
-                    return Ok(Some(TuiAction::Launch(worktree.path.clone())));
+                    return Ok(Some(TuiAction::Open(worktree.path.clone())));
                 }
                 self.set_error("no worktree selected");
             }
@@ -393,7 +387,6 @@ impl<'repo> TuiApp<'repo> {
             branch: Some(branch),
             base: Some(base),
             path,
-            agent_command: None,
         };
 
         let plan = match build_new_worktree_plan(self.repo, options) {
@@ -416,7 +409,7 @@ impl<'repo> TuiApp<'repo> {
         self.mode = Mode::Browse;
         self.set_info(format!("created {}", plan.path.display()));
 
-        Ok(None)
+        Ok(Some(TuiAction::Open(plan.path.clone())))
     }
 
     fn handle_remove_confirmation(
@@ -659,7 +652,6 @@ fn render_worktree_list(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp
 }
 
 fn render_worktree_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
-    let agent = default_agent_command();
     let lines = match app.selected_worktree() {
         Some(worktree) => vec![
             Line::from(""),
@@ -683,7 +675,7 @@ fn render_worktree_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Tui
                 Style::default().fg(theme::FAINT),
             )),
             Line::from(""),
-            detail_row("", "agent", &agent, theme::GOOD),
+            detail_row("", "open", "tmux", theme::GOOD),
         ],
         None => vec![
             Line::from(""),
