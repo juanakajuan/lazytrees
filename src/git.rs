@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::error::{AppError, AppResult};
 
@@ -48,7 +48,9 @@ pub fn discover_repo() -> AppResult<Repo> {
         None::<&Path>,
         ["rev-parse", "--show-toplevel"],
     )?);
-    let worktrees = list_worktrees_from_cwd().unwrap_or_default();
+    let worktrees = capture_git(None::<&Path>, ["worktree", "list", "--porcelain"])
+        .map(|output| parse_worktree_list(&output))
+        .unwrap_or_default();
     let primary_root = worktrees
         .first()
         .map(|worktree| worktree.path.clone())
@@ -156,27 +158,21 @@ pub fn open_tmux_session(path: &Path) -> AppResult<()> {
     }
 
     let session = available_tmux_session_name(path)?;
-    if env::var_os("TMUX").is_some() {
-        let mut create = Command::new("tmux");
-        create
-            .args(["new-session", "-d", "-s"])
-            .arg(&session)
-            .arg("-c")
-            .arg(path);
-        run_tmux(&mut create, "tmux new-session")?;
+    let inside_tmux = env::var_os("TMUX").is_some();
 
+    let mut create = Command::new("tmux");
+    create.arg("new-session");
+    if inside_tmux {
+        create.arg("-d");
+    }
+    create.args(["-s"]).arg(&session).arg("-c").arg(path);
+    run_tmux(&mut create, "tmux new-session")?;
+
+    if inside_tmux {
         let target = exact_tmux_target(&session);
         let mut switch = Command::new("tmux");
         switch.args(["switch-client", "-t"]).arg(target);
         run_tmux(&mut switch, "tmux switch-client")?;
-    } else {
-        let mut create = Command::new("tmux");
-        create
-            .args(["new-session", "-s"])
-            .arg(&session)
-            .arg("-c")
-            .arg(path);
-        run_tmux(&mut create, "tmux new-session")?;
     }
 
     Ok(())
@@ -195,14 +191,11 @@ pub fn format_worktree(worktree: &Worktree) -> String {
 
 impl Worktree {
     pub fn branch_label(&self) -> &str {
-        if let Some(branch) = self.branch.as_deref() {
-            branch
-        } else if self.detached {
-            "detached"
-        } else if self.bare {
-            "bare"
-        } else {
-            "unknown"
+        match self.branch.as_deref() {
+            Some(branch) => branch,
+            None if self.detached => "detached",
+            None if self.bare => "bare",
+            None => "unknown",
         }
     }
 
@@ -214,16 +207,9 @@ impl Worktree {
     }
 }
 
-fn list_worktrees_from_cwd() -> AppResult<Vec<Worktree>> {
-    let output = capture_git(None::<&Path>, ["worktree", "list", "--porcelain"])?;
-    Ok(parse_worktree_list(&output))
-}
-
 fn validate_branch_name(repo: &Repo, branch: &str) -> AppResult<()> {
-    let output = Command::new("git")
-        .args(["check-ref-format", "--branch", branch])
-        .current_dir(&repo.root)
-        .output()?;
+    let output =
+        git_command(Some(&repo.root), &["check-ref-format", "--branch", branch]).output()?;
 
     if output.status.success() {
         Ok(())
@@ -234,29 +220,42 @@ fn validate_branch_name(repo: &Repo, branch: &str) -> AppResult<()> {
 
 fn local_branch_exists(repo: &Repo, branch: &str) -> AppResult<bool> {
     let ref_name = format!("refs/heads/{branch}");
-    let status = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", ref_name.as_str()])
-        .current_dir(&repo.root)
-        .status()?;
+    let status = git_command(
+        Some(&repo.root),
+        &["show-ref", "--verify", "--quiet", ref_name.as_str()],
+    )
+    .status()?;
 
-    status_to_bool(status, "git show-ref")
+    if status.success() {
+        return Ok(true);
+    }
+
+    match status.code() {
+        Some(1) => Ok(false),
+        _ => Err(AppError::new(format!(
+            "git show-ref failed with status {status}"
+        ))),
+    }
 }
 
 fn branch_is_checked_out(repo: &Repo, branch: &str) -> AppResult<bool> {
-    Ok(list_worktrees(repo)?.iter().any(|worktree| {
-        worktree
-            .branch
-            .as_deref()
-            .is_some_and(|checked_out| checked_out == branch)
-    }))
+    Ok(list_worktrees(repo)?
+        .iter()
+        .any(|worktree| worktree.branch.as_deref() == Some(branch)))
+}
+
+fn git_command(cwd: Option<&Path>, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.args(args.iter().copied());
+    if let Some(directory) = cwd {
+        command.current_dir(directory);
+    }
+    command
 }
 
 fn run_git<'a>(repo: &Repo, args: impl IntoIterator<Item = &'a str>) -> AppResult<()> {
     let args: Vec<&str> = args.into_iter().collect();
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(&repo.root)
-        .output()?;
+    let output = git_command(Some(&repo.root), &args).output()?;
 
     if output.status.success() {
         Ok(())
@@ -270,13 +269,7 @@ fn capture_git<'a>(
     args: impl IntoIterator<Item = &'a str>,
 ) -> AppResult<String> {
     let args: Vec<&str> = args.into_iter().collect();
-    let mut command = Command::new("git");
-    command.args(&args);
-    if let Some(directory) = cwd {
-        command.current_dir(directory);
-    }
-
-    let output = command.output()?;
+    let output = git_command(cwd, &args).output()?;
     if !output.status.success() {
         return Err(git_failure(&args, &output.stderr));
     }
@@ -287,19 +280,6 @@ fn capture_git<'a>(
 fn git_failure(args: &[&str], stderr: &[u8]) -> AppError {
     let stderr = String::from_utf8_lossy(stderr);
     AppError::new(format!("git {} failed: {}", args.join(" "), stderr.trim()))
-}
-
-fn status_to_bool(status: ExitStatus, command: &str) -> AppResult<bool> {
-    if status.success() {
-        return Ok(true);
-    }
-
-    match status.code() {
-        Some(1) => Ok(false),
-        _ => Err(AppError::new(format!(
-            "{command} failed with status {status}"
-        ))),
-    }
 }
 
 fn absolute_path(path: &Path) -> AppResult<PathBuf> {

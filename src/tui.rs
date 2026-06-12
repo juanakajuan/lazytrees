@@ -42,31 +42,32 @@ mod theme {
 /// Rounded, padded panel with an accent-styled title and muted border.
 fn panel(title: &str, focused: bool) -> Block<'static> {
     let border = if focused { theme::ACCENT } else { theme::FAINT };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border))
+    rounded_block(border)
         .padding(Padding::horizontal(1))
         .title(Span::styled(
             format!(" {title} "),
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
+            bold_style(theme::ACCENT),
         ))
 }
 
 /// A `[key] label` hint used in the footer.
 fn hint<'a>(key: &'a str, label: &'a str) -> Vec<Span<'a>> {
     vec![
-        Span::styled(
-            key,
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(key, bold_style(theme::ACCENT)),
         Span::styled(format!(" {label}"), Style::default().fg(theme::MUTED)),
         Span::styled("   ", Style::default()),
     ]
+}
+
+fn bold_style(color: Color) -> Style {
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn rounded_block(border_color: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
 }
 
 pub fn run(repo: &Repo) -> AppResult<()> {
@@ -104,16 +105,13 @@ fn run_loop(repo: &Repo, terminal: &mut TerminalBackend) -> AppResult<()> {
             continue;
         }
 
-        match app.handle_key(key)? {
-            Some(TuiAction::Open(path)) => {
-                let result = open_from_tui(terminal, &path);
-                app.refresh()?;
-                match result {
-                    Ok(()) => app.set_info(format!("tmux session opened: {}", path.display())),
-                    Err(error) => app.set_error(error.to_string()),
-                }
+        if let Some(TuiAction::Open(path)) = app.handle_key(key)? {
+            let result = open_from_tui(terminal, &path);
+            app.refresh()?;
+            match result {
+                Ok(()) => app.set_info(format!("tmux session opened: {}", path.display())),
+                Err(error) => app.set_error(error.to_string()),
             }
-            None => {}
         }
     }
 }
@@ -418,8 +416,8 @@ impl<'repo> TuiApp<'repo> {
         path: PathBuf,
         branch: String,
     ) -> AppResult<Option<TuiAction>> {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => match remove_worktree(self.repo, &path) {
+        match confirmation_choice(key) {
+            Some(ConfirmationChoice::Confirm) => match remove_worktree(self.repo, &path) {
                 Ok(()) => {
                     self.refresh()?;
                     self.mode = Mode::Browse;
@@ -430,29 +428,29 @@ impl<'repo> TuiApp<'repo> {
                     self.set_error(error.to_string());
                 }
             },
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            Some(ConfirmationChoice::Cancel) => {
                 self.mode = Mode::Browse;
                 self.set_info("remove cancelled");
             }
-            _ => self.mode = Mode::ConfirmRemove { path, branch },
+            None => self.mode = Mode::ConfirmRemove { path, branch },
         }
 
         Ok(None)
     }
 
     fn handle_prune_confirmation(&mut self, key: KeyEvent) -> AppResult<Option<TuiAction>> {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+        match confirmation_choice(key) {
+            Some(ConfirmationChoice::Confirm) => {
                 prune_worktrees(self.repo)?;
                 self.refresh()?;
                 self.mode = Mode::Browse;
                 self.set_info("pruned stale metadata");
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            Some(ConfirmationChoice::Cancel) => {
                 self.mode = Mode::Browse;
                 self.set_info("prune cancelled");
             }
-            _ => self.mode = Mode::ConfirmPrune,
+            None => self.mode = Mode::ConfirmPrune,
         }
 
         Ok(None)
@@ -485,10 +483,7 @@ impl<'repo> TuiApp<'repo> {
     }
 
     fn set_info(&mut self, text: impl Into<String>) {
-        self.status = StatusMessage {
-            text: text.into(),
-            kind: StatusKind::Info,
-        };
+        self.set_status(StatusKind::Info, text);
     }
 
     fn cancel_new_worktree(&mut self) -> AppResult<Option<TuiAction>> {
@@ -498,10 +493,27 @@ impl<'repo> TuiApp<'repo> {
     }
 
     fn set_error(&mut self, text: impl Into<String>) {
+        self.set_status(StatusKind::Error, text);
+    }
+
+    fn set_status(&mut self, kind: StatusKind, text: impl Into<String>) {
         self.status = StatusMessage {
             text: text.into(),
-            kind: StatusKind::Error,
+            kind,
         };
+    }
+}
+
+enum ConfirmationChoice {
+    Confirm,
+    Cancel,
+}
+
+fn confirmation_choice(key: KeyEvent) -> Option<ConfirmationChoice> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(ConfirmationChoice::Confirm),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(ConfirmationChoice::Cancel),
+        _ => None,
     }
 }
 
@@ -546,40 +558,23 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &TuiApp<'_>) {
 
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
     let count = app.worktrees.len();
+    let count_label = if count == 1 {
+        " worktree "
+    } else {
+        " worktrees "
+    };
     let title = Line::from(vec![
-        Span::styled(
-            " 🌳 lazytrees ",
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" 🌳 lazytrees ", bold_style(theme::ACCENT)),
         Span::styled("│ ", Style::default().fg(theme::FAINT)),
-        Span::styled(
-            format!("{count}"),
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if count == 1 {
-                " worktree "
-            } else {
-                " worktrees "
-            },
-            Style::default().fg(theme::MUTED),
-        ),
+        Span::styled(format!("{count}"), bold_style(theme::ACCENT)),
+        Span::styled(count_label, Style::default().fg(theme::MUTED)),
         Span::styled("│ ", Style::default().fg(theme::FAINT)),
         Span::styled(
             app.repo.root.display().to_string(),
             Style::default().fg(theme::TEXT),
         ),
     ]);
-    let header = Paragraph::new(title).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme::FAINT)),
-    );
+    let header = Paragraph::new(title).block(rounded_block(theme::FAINT));
     frame.render_widget(header, area);
 }
 
@@ -612,30 +607,7 @@ fn render_worktree_list(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp
         return;
     }
 
-    let items: Vec<ListItem<'_>> = app
-        .worktrees
-        .iter()
-        .map(|worktree| {
-            let (glyph, glyph_style) = worktree_glyph(worktree);
-            let branch_style = if worktree.prunable {
-                Style::default().fg(theme::WARN)
-            } else {
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD)
-            };
-            let dir = worktree
-                .path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| worktree.path.display().to_string());
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{glyph} "), glyph_style),
-                Span::styled(worktree.branch_label().to_owned(), branch_style),
-                Span::styled(format!("  {dir}"), Style::default().fg(theme::FAINT)),
-            ]))
-        })
-        .collect();
+    let items: Vec<_> = app.worktrees.iter().map(worktree_list_item).collect();
 
     let list = List::new(items)
         .block(panel("Worktrees", true))
@@ -649,6 +621,26 @@ fn render_worktree_list(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp
     let mut state = ListState::default();
     state.select(Some(app.selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn worktree_list_item(worktree: &Worktree) -> ListItem<'static> {
+    let (glyph, glyph_style) = worktree_glyph(worktree);
+    let branch_style = if worktree.prunable {
+        Style::default().fg(theme::WARN)
+    } else {
+        bold_style(theme::TEXT)
+    };
+    let dir = worktree
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| worktree.path.display().to_string());
+
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{glyph} "), glyph_style),
+        Span::styled(worktree.branch_label().to_owned(), branch_style),
+        Span::styled(format!("  {dir}"), Style::default().fg(theme::FAINT)),
+    ]))
 }
 
 fn render_worktree_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
@@ -740,12 +732,16 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
         Span::styled(app.status.text.clone(), status_style),
         Span::styled("    ", Style::default()),
     ];
-    status_line.extend(hint("↵", "open"));
-    status_line.extend(hint("n", "new"));
-    status_line.extend(hint("d", "remove"));
-    status_line.extend(hint("p", "prune"));
-    status_line.extend(hint("r", "refresh"));
-    status_line.extend(hint("q", "quit"));
+    for (key, label) in [
+        ("↵", "open"),
+        ("n", "new"),
+        ("d", "remove"),
+        ("p", "prune"),
+        ("r", "refresh"),
+        ("q", "quit"),
+    ] {
+        status_line.extend(hint(key, label));
+    }
 
     let footer = Paragraph::new(vec![
         Line::from(status_line),
@@ -757,13 +753,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
             ),
         ]),
     ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme::FAINT))
-            .padding(Padding::horizontal(1)),
-    );
+    .block(rounded_block(theme::FAINT).padding(Padding::horizontal(1)));
     frame.render_widget(footer, area);
 }
 
@@ -787,67 +777,72 @@ fn render_mode(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
             );
         }
         Mode::ConfirmRemove { path, branch } => {
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Remove selected worktree?",
-                    Style::default()
-                        .fg(theme::TEXT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(vec![
-                    Span::styled("branch  ", Style::default().fg(theme::FAINT)),
-                    Span::styled(branch.to_owned(), Style::default().fg(theme::TEXT)),
-                ]),
-                Line::from(vec![
-                    Span::styled("path    ", Style::default().fg(theme::FAINT)),
-                    Span::styled(
-                        path.display().to_string(),
-                        Style::default().fg(theme::MUTED),
-                    ),
-                ]),
-                Line::from(""),
-                confirm_action_line(),
-            ];
-            render_confirmation_popup(
-                frame,
-                area,
-                ConfirmationPopup {
-                    width_percent: 64,
-                    height: 9,
-                    title: "Confirm remove",
-                    border_color: theme::BAD,
-                    lines,
-                    wrap: true,
-                },
-            );
+            render_remove_confirmation(frame, area, path, branch);
         }
-        Mode::ConfirmPrune => {
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Run git worktree prune?",
-                    Style::default()
-                        .fg(theme::TEXT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                confirm_action_line(),
-            ];
-            render_confirmation_popup(
-                frame,
-                area,
-                ConfirmationPopup {
-                    width_percent: 56,
-                    height: 7,
-                    title: "Confirm prune",
-                    border_color: theme::WARN,
-                    lines,
-                    wrap: false,
-                },
-            );
-        }
+        Mode::ConfirmPrune => render_prune_confirmation(frame, area),
     }
+}
+
+fn render_remove_confirmation(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    path: &Path,
+    branch: &str,
+) {
+    let lines = vec![
+        Line::from(""),
+        confirmation_title("Remove selected worktree?"),
+        Line::from(vec![
+            Span::styled("branch  ", Style::default().fg(theme::FAINT)),
+            Span::styled(branch.to_owned(), Style::default().fg(theme::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("path    ", Style::default().fg(theme::FAINT)),
+            Span::styled(
+                path.display().to_string(),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]),
+        Line::from(""),
+        confirm_action_line(),
+    ];
+    render_confirmation_popup(
+        frame,
+        area,
+        ConfirmationPopup {
+            width_percent: 64,
+            height: 9,
+            title: "Confirm remove",
+            border_color: theme::BAD,
+            lines,
+            wrap: true,
+        },
+    );
+}
+
+fn render_prune_confirmation(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    let lines = vec![
+        Line::from(""),
+        confirmation_title("Run git worktree prune?"),
+        Line::from(""),
+        confirm_action_line(),
+    ];
+    render_confirmation_popup(
+        frame,
+        area,
+        ConfirmationPopup {
+            width_percent: 56,
+            height: 7,
+            title: "Confirm prune",
+            border_color: theme::WARN,
+            lines,
+            wrap: false,
+        },
+    );
+}
+
+fn confirmation_title(text: &'static str) -> Line<'static> {
+    Line::from(Span::styled(text, bold_style(theme::TEXT)))
 }
 
 struct ConfirmationPopup {
@@ -885,12 +880,7 @@ fn render_prompt(
         Line::from(""),
         Line::from(vec![
             Span::styled("❯ ", Style::default().fg(theme::ACCENT)),
-            Span::styled(
-                input.to_owned(),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(input.to_owned(), bold_style(theme::TEXT)),
             Span::styled("█", Style::default().fg(theme::ACCENT)),
         ]),
     ];
@@ -901,27 +891,21 @@ fn render_prompt(
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "↵",
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" accept    ", Style::default().fg(theme::MUTED)),
-        Span::styled(
-            "esc",
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" cancel", Style::default().fg(theme::MUTED)),
-    ]));
+    lines.push(prompt_action_line());
 
     let paragraph = Paragraph::new(lines)
         .block(popup_block(title, theme::ACCENT).padding(Padding::horizontal(1)))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, popup);
+}
+
+fn prompt_action_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("↵", bold_style(theme::ACCENT)),
+        Span::styled(" accept    ", Style::default().fg(theme::MUTED)),
+        Span::styled("esc", bold_style(theme::ACCENT)),
+        Span::styled(" cancel", Style::default().fg(theme::MUTED)),
+    ])
 }
 
 fn clear_popup_area(
@@ -937,31 +921,14 @@ fn clear_popup_area(
 }
 
 fn popup_block(title: &str, border_color: Color) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
-        ))
+    rounded_block(border_color).title(Span::styled(format!(" {title} "), bold_style(border_color)))
 }
 
 fn confirm_action_line() -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            "y",
-            Style::default()
-                .fg(theme::GOOD)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("y", bold_style(theme::GOOD)),
         Span::styled(" confirm    ", Style::default().fg(theme::MUTED)),
-        Span::styled(
-            "n",
-            Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("n", bold_style(theme::BAD)),
         Span::styled(" cancel", Style::default().fg(theme::MUTED)),
     ])
 }

@@ -44,13 +44,13 @@ pub fn print_help() {
 
 pub fn new_worktree(repo: &Repo, args: &[String]) -> AppResult<()> {
     let mut options = parse_new_options(args)?;
-    let prompt_missing = options.branch.is_none();
+    let prompted_for_branch = options.branch.is_none();
 
     if options.branch.is_none() {
         options.branch = Some(prompt_required("Branch name")?);
     }
 
-    if options.base.is_none() && prompt_missing {
+    if options.base.is_none() && prompted_for_branch {
         let base = prompt("Base ref", Some("HEAD"))?;
         options.base = Some(base);
     }
@@ -92,16 +92,11 @@ pub fn list_worktrees(repo: &Repo) -> AppResult<()> {
 }
 
 pub fn open_worktree(repo: &Repo, args: &[String]) -> AppResult<()> {
-    let mut options = parse_open_options(args)?;
+    let path = match parse_open_options(args)?.path {
+        Some(path) => path,
+        None => select_worktree(repo)?,
+    };
 
-    if options.path.is_none() {
-        options.path = Some(select_worktree(repo)?);
-    }
-
-    let path = options
-        .path
-        .as_ref()
-        .ok_or_else(|| AppError::new("missing worktree path"))?;
     if !path.is_dir() {
         return Err(AppError::new(format!(
             "not a directory: {}",
@@ -110,7 +105,7 @@ pub fn open_worktree(repo: &Repo, args: &[String]) -> AppResult<()> {
     }
 
     println!("opening tmux session in {}", path.display());
-    open_tmux_session(path)
+    open_tmux_session(&path)
 }
 
 pub fn prune_worktrees(repo: &Repo) -> AppResult<()> {
@@ -121,13 +116,13 @@ pub fn prune_worktrees(repo: &Repo) -> AppResult<()> {
 
 pub fn remove_worktree(repo: &Repo, args: &[String]) -> AppResult<()> {
     let options = parse_remove_options(args)?;
-    let prompt_missing = options.path.is_none();
+    let prompted_for_path = options.path.is_none();
     let path = match options.path {
         Some(path) => path,
         None => select_worktree(repo)?,
     };
 
-    if prompt_missing {
+    if prompted_for_path {
         let label = format!("Remove worktree {}?", path.display());
         if !confirm(&label, false)? {
             println!("remove cancelled");
@@ -224,12 +219,10 @@ fn parse_new_options(args: &[String]) -> AppResult<NewOptions> {
                 } else if let Some(path) = argument.strip_prefix("--path=") {
                     options.path = Some(PathBuf::from(path));
                 } else if argument.starts_with('-') {
-                    return Err(AppError::new(format!("unknown option `{argument}`")));
+                    return Err(unknown_option(argument));
                 } else {
                     if options.branch.is_some() {
-                        return Err(AppError::new(format!(
-                            "unexpected extra argument `{argument}`"
-                        )));
+                        return Err(unexpected_extra_argument(argument));
                     }
                     options.branch = Some(argument.to_owned());
                 }
@@ -243,52 +236,38 @@ fn parse_new_options(args: &[String]) -> AppResult<NewOptions> {
 }
 
 fn parse_open_options(args: &[String]) -> AppResult<OpenOptions> {
-    let mut options = OpenOptions::default();
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--path" => {
-                options.path = Some(required_path_value(args, &mut index)?);
-            }
-            argument => {
-                if let Some(path) = argument.strip_prefix("--path=") {
-                    options.path = Some(PathBuf::from(path));
-                } else if argument.starts_with('-') {
-                    return Err(AppError::new(format!("unknown option `{argument}`")));
-                } else {
-                    set_positional_path(&mut options.path, argument)?;
-                }
-            }
-        }
-
-        index += 1;
-    }
-
-    Ok(options)
+    Ok(OpenOptions {
+        path: parse_path_options(args)?,
+    })
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoveOptions {
     path: Option<PathBuf>,
 }
 
 fn parse_remove_options(args: &[String]) -> AppResult<RemoveOptions> {
-    let mut options = RemoveOptions::default();
+    Ok(RemoveOptions {
+        path: parse_path_options(args)?,
+    })
+}
+
+fn parse_path_options(args: &[String]) -> AppResult<Option<PathBuf>> {
+    let mut path = None;
     let mut index = 0;
 
     while index < args.len() {
         match args[index].as_str() {
             "--path" => {
-                options.path = Some(required_path_value(args, &mut index)?);
+                path = Some(required_path_value(args, &mut index)?);
             }
             argument => {
-                if let Some(path) = argument.strip_prefix("--path=") {
-                    options.path = Some(PathBuf::from(path));
+                if let Some(path_value) = argument.strip_prefix("--path=") {
+                    path = Some(PathBuf::from(path_value));
                 } else if argument.starts_with('-') {
-                    return Err(AppError::new(format!("unknown option `{argument}`")));
+                    return Err(unknown_option(argument));
                 } else {
-                    set_positional_path(&mut options.path, argument)?;
+                    set_positional_path(&mut path, argument)?;
                 }
             }
         }
@@ -296,7 +275,7 @@ fn parse_remove_options(args: &[String]) -> AppResult<RemoveOptions> {
         index += 1;
     }
 
-    Ok(options)
+    Ok(path)
 }
 
 fn required_option_value<'a>(
@@ -316,13 +295,19 @@ fn required_path_value(args: &[String], index: &mut usize) -> AppResult<PathBuf>
 
 fn set_positional_path(path: &mut Option<PathBuf>, argument: &str) -> AppResult<()> {
     if path.is_some() {
-        return Err(AppError::new(format!(
-            "unexpected extra argument `{argument}`"
-        )));
+        return Err(unexpected_extra_argument(argument));
     }
 
     *path = Some(PathBuf::from(argument));
     Ok(())
+}
+
+fn unknown_option(argument: &str) -> AppError {
+    AppError::new(format!("unknown option `{argument}`"))
+}
+
+fn unexpected_extra_argument(argument: &str) -> AppError {
+    AppError::new(format!("unexpected extra argument `{argument}`"))
 }
 
 #[cfg(test)]
