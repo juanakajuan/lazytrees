@@ -247,40 +247,32 @@ fn parse_new_options(args: &[String]) -> AppResult<NewOptions> {
     while index < args.len() {
         match args[index].as_str() {
             "--base" => {
-                index += 1;
-                options.base = Some(required_arg(args, index, "--base")?.to_owned());
+                options.base = Some(required_option_value(args, &mut index, "--base")?.to_owned());
             }
             "--path" => {
-                index += 1;
-                options.path = Some(PathBuf::from(required_arg(args, index, "--path")?));
+                options.path = Some(required_path_value(args, &mut index)?);
             }
             "--agent" => {
-                index += 1;
-                if index >= args.len() {
-                    return Err(AppError::new("--agent requires a command"));
-                }
-                options.agent_command = Some(args[index..].join(" "));
+                options.agent_command = Some(required_agent_command(args, &mut index)?);
                 return Ok(options);
             }
-            argument if argument.starts_with("--base=") => {
-                options.base = Some(argument["--base=".len()..].to_owned());
-            }
-            argument if argument.starts_with("--path=") => {
-                options.path = Some(PathBuf::from(&argument["--path=".len()..]));
-            }
-            argument if argument.starts_with("--agent=") => {
-                options.agent_command = Some(argument["--agent=".len()..].to_owned());
-            }
-            argument if argument.starts_with('-') => {
-                return Err(AppError::new(format!("unknown option `{argument}`")));
-            }
-            branch => {
-                if options.branch.is_some() {
-                    return Err(AppError::new(format!(
-                        "unexpected extra argument `{branch}`"
-                    )));
+            argument => {
+                if let Some(base) = argument.strip_prefix("--base=") {
+                    options.base = Some(base.to_owned());
+                } else if let Some(path) = argument.strip_prefix("--path=") {
+                    options.path = Some(PathBuf::from(path));
+                } else if let Some(command) = argument.strip_prefix("--agent=") {
+                    options.agent_command = Some(command.to_owned());
+                } else if argument.starts_with('-') {
+                    return Err(AppError::new(format!("unknown option `{argument}`")));
+                } else {
+                    if options.branch.is_some() {
+                        return Err(AppError::new(format!(
+                            "unexpected extra argument `{argument}`"
+                        )));
+                    }
+                    options.branch = Some(argument.to_owned());
                 }
-                options.branch = Some(branch.to_owned());
             }
         }
 
@@ -297,31 +289,22 @@ fn parse_launch_options(args: &[String]) -> AppResult<LaunchOptions> {
     while index < args.len() {
         match args[index].as_str() {
             "--path" => {
-                index += 1;
-                options.path = Some(PathBuf::from(required_arg(args, index, "--path")?));
+                options.path = Some(required_path_value(args, &mut index)?);
             }
             "--agent" => {
-                index += 1;
-                if index >= args.len() {
-                    return Err(AppError::new("--agent requires a command"));
-                }
-                options.agent_command = Some(args[index..].join(" "));
+                options.agent_command = Some(required_agent_command(args, &mut index)?);
                 return Ok(options);
             }
-            argument if argument.starts_with("--path=") => {
-                options.path = Some(PathBuf::from(&argument["--path=".len()..]));
-            }
-            argument if argument.starts_with("--agent=") => {
-                options.agent_command = Some(argument["--agent=".len()..].to_owned());
-            }
-            argument if argument.starts_with('-') => {
-                return Err(AppError::new(format!("unknown option `{argument}`")));
-            }
-            path => {
-                if options.path.is_some() {
-                    return Err(AppError::new(format!("unexpected extra argument `{path}`")));
+            argument => {
+                if let Some(path) = argument.strip_prefix("--path=") {
+                    options.path = Some(PathBuf::from(path));
+                } else if let Some(command) = argument.strip_prefix("--agent=") {
+                    options.agent_command = Some(command.to_owned());
+                } else if argument.starts_with('-') {
+                    return Err(AppError::new(format!("unknown option `{argument}`")));
+                } else {
+                    set_positional_path(&mut options.path, argument)?;
                 }
-                options.path = Some(PathBuf::from(path));
             }
         }
 
@@ -343,20 +326,16 @@ fn parse_remove_options(args: &[String]) -> AppResult<RemoveOptions> {
     while index < args.len() {
         match args[index].as_str() {
             "--path" => {
-                index += 1;
-                options.path = Some(PathBuf::from(required_arg(args, index, "--path")?));
+                options.path = Some(required_path_value(args, &mut index)?);
             }
-            argument if argument.starts_with("--path=") => {
-                options.path = Some(PathBuf::from(&argument["--path=".len()..]));
-            }
-            argument if argument.starts_with('-') => {
-                return Err(AppError::new(format!("unknown option `{argument}`")));
-            }
-            path => {
-                if options.path.is_some() {
-                    return Err(AppError::new(format!("unexpected extra argument `{path}`")));
+            argument => {
+                if let Some(path) = argument.strip_prefix("--path=") {
+                    options.path = Some(PathBuf::from(path));
+                } else if argument.starts_with('-') {
+                    return Err(AppError::new(format!("unknown option `{argument}`")));
+                } else {
+                    set_positional_path(&mut options.path, argument)?;
                 }
-                options.path = Some(PathBuf::from(path));
             }
         }
 
@@ -366,10 +345,39 @@ fn parse_remove_options(args: &[String]) -> AppResult<RemoveOptions> {
     Ok(options)
 }
 
-fn required_arg<'a>(args: &'a [String], index: usize, option: &str) -> AppResult<&'a str> {
-    args.get(index)
+fn required_option_value<'a>(
+    args: &'a [String],
+    index: &mut usize,
+    option: &str,
+) -> AppResult<&'a str> {
+    *index += 1;
+    args.get(*index)
         .map(String::as_str)
         .ok_or_else(|| AppError::new(format!("{option} requires a value")))
+}
+
+fn required_path_value(args: &[String], index: &mut usize) -> AppResult<PathBuf> {
+    Ok(PathBuf::from(required_option_value(args, index, "--path")?))
+}
+
+fn required_agent_command(args: &[String], index: &mut usize) -> AppResult<String> {
+    *index += 1;
+    if *index >= args.len() {
+        return Err(AppError::new("--agent requires a command"));
+    }
+
+    Ok(args[*index..].join(" "))
+}
+
+fn set_positional_path(path: &mut Option<PathBuf>, argument: &str) -> AppResult<()> {
+    if path.is_some() {
+        return Err(AppError::new(format!(
+            "unexpected extra argument `{argument}`"
+        )));
+    }
+
+    *path = Some(PathBuf::from(argument));
+    Ok(())
 }
 
 #[cfg(test)]

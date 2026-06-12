@@ -29,8 +29,7 @@ type TerminalBackend = Terminal<CrosstermBackend<io::Stdout>>;
 mod theme {
     use ratatui::style::Color;
 
-    pub const ACCENT: Color = Color::Rgb(0xFE, 0x80, 0x19); // orange
-    pub const ACCENT_ALT: Color = Color::Rgb(0x83, 0xA5, 0x98); // blue
+    pub const ACCENT: Color = Color::Rgb(0x83, 0xA5, 0x98); // blue
     pub const TEXT: Color = Color::Rgb(0xEB, 0xDB, 0xB2); // fg1
     pub const MUTED: Color = Color::Rgb(0xA8, 0x99, 0x84); // fg4
     pub const FAINT: Color = Color::Rgb(0x66, 0x5C, 0x54); // bg3
@@ -62,7 +61,7 @@ fn hint<'a>(key: &'a str, label: &'a str) -> Vec<Span<'a>> {
         Span::styled(
             key,
             Style::default()
-                .fg(theme::ACCENT_ALT)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!(" {label}"), Style::default().fg(theme::MUTED)),
@@ -227,73 +226,88 @@ impl<'repo> TuiApp<'repo> {
         let mode = std::mem::replace(&mut self.mode, Mode::Browse);
         match mode {
             Mode::Browse => self.handle_browse_key(key),
-            Mode::NewBranch { mut input } => match prompt_key(&mut input, key) {
-                PromptResult::Submit(branch) => self.submit_branch(branch),
-                PromptResult::Cancel => {
-                    self.mode = Mode::Browse;
-                    self.set_info("new worktree cancelled");
-                    Ok(None)
-                }
-                PromptResult::Continue => {
-                    self.mode = Mode::NewBranch { input };
-                    Ok(None)
-                }
-            },
-            Mode::NewBase { branch, mut input } => match prompt_key(&mut input, key) {
-                PromptResult::Submit(base) => {
-                    let base = if base.is_empty() {
-                        "HEAD".to_owned()
-                    } else {
-                        base
-                    };
-                    self.mode = Mode::NewPath {
-                        branch,
-                        base,
-                        input: String::new(),
-                    };
-                    Ok(None)
-                }
-                PromptResult::Cancel => {
-                    self.mode = Mode::Browse;
-                    self.set_info("new worktree cancelled");
-                    Ok(None)
-                }
-                PromptResult::Continue => {
-                    self.mode = Mode::NewBase { branch, input };
-                    Ok(None)
-                }
-            },
+            Mode::NewBranch { input } => self.handle_new_branch_key(key, input),
+            Mode::NewBase { branch, input } => self.handle_new_base_key(key, branch, input),
             Mode::NewPath {
                 branch,
                 base,
-                mut input,
-            } => match prompt_key(&mut input, key) {
-                PromptResult::Submit(path) => {
-                    let path = if path.is_empty() {
-                        None
-                    } else {
-                        Some(PathBuf::from(path))
-                    };
-                    self.create_from_prompt(branch, base, path)
-                }
-                PromptResult::Cancel => {
-                    self.mode = Mode::Browse;
-                    self.set_info("new worktree cancelled");
-                    Ok(None)
-                }
-                PromptResult::Continue => {
-                    self.mode = Mode::NewPath {
-                        branch,
-                        base,
-                        input,
-                    };
-                    Ok(None)
-                }
-            },
+                input,
+            } => self.handle_new_path_key(key, branch, base, input),
             Mode::ConfirmRemove { path, branch } => {
                 self.handle_remove_confirmation(key, path, branch)
             }
             Mode::ConfirmPrune => self.handle_prune_confirmation(key),
+        }
+    }
+
+    fn handle_new_branch_key(
+        &mut self,
+        key: KeyEvent,
+        mut input: String,
+    ) -> AppResult<Option<TuiAction>> {
+        match prompt_key(&mut input, key) {
+            PromptResult::Submit(branch) => self.submit_branch(branch),
+            PromptResult::Cancel => self.cancel_new_worktree(),
+            PromptResult::Continue => {
+                self.mode = Mode::NewBranch { input };
+                Ok(None)
+            }
+        }
+    }
+
+    fn handle_new_base_key(
+        &mut self,
+        key: KeyEvent,
+        branch: String,
+        mut input: String,
+    ) -> AppResult<Option<TuiAction>> {
+        match prompt_key(&mut input, key) {
+            PromptResult::Submit(base) => {
+                let base = if base.is_empty() {
+                    "HEAD".to_owned()
+                } else {
+                    base
+                };
+                self.mode = Mode::NewPath {
+                    branch,
+                    base,
+                    input: String::new(),
+                };
+                Ok(None)
+            }
+            PromptResult::Cancel => self.cancel_new_worktree(),
+            PromptResult::Continue => {
+                self.mode = Mode::NewBase { branch, input };
+                Ok(None)
+            }
+        }
+    }
+
+    fn handle_new_path_key(
+        &mut self,
+        key: KeyEvent,
+        branch: String,
+        base: String,
+        mut input: String,
+    ) -> AppResult<Option<TuiAction>> {
+        match prompt_key(&mut input, key) {
+            PromptResult::Submit(path) => {
+                let path = if path.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(path))
+                };
+                self.create_from_prompt(branch, base, path)
+            }
+            PromptResult::Cancel => self.cancel_new_worktree(),
+            PromptResult::Continue => {
+                self.mode = Mode::NewPath {
+                    branch,
+                    base,
+                    input,
+                };
+                Ok(None)
+            }
         }
     }
 
@@ -484,6 +498,12 @@ impl<'repo> TuiApp<'repo> {
         };
     }
 
+    fn cancel_new_worktree(&mut self) -> AppResult<Option<TuiAction>> {
+        self.mode = Mode::Browse;
+        self.set_info("new worktree cancelled");
+        Ok(None)
+    }
+
     fn set_error(&mut self, text: impl Into<String>) {
         self.status = StatusMessage {
             text: text.into(),
@@ -544,7 +564,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
         Span::styled(
             format!("{count}"),
             Style::default()
-                .fg(theme::ACCENT_ALT)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -644,7 +664,7 @@ fn render_worktree_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Tui
         Some(worktree) => vec![
             Line::from(""),
             detail_row("", "branch", worktree.branch_label(), theme::TEXT),
-            detail_row("", "head", worktree.short_head(), theme::ACCENT_ALT),
+            detail_row("", "head", worktree.short_head(), theme::ACCENT),
             detail_row(
                 "",
                 "path",
@@ -698,7 +718,7 @@ fn worktree_glyph(worktree: &Worktree) -> (&'static str, Style) {
     } else if worktree.bare {
         ("◇", Style::default().fg(theme::MUTED))
     } else if worktree.detached {
-        ("⚲", Style::default().fg(theme::ACCENT_ALT))
+        ("⚲", Style::default().fg(theme::ACCENT))
     } else {
         ("●", Style::default().fg(theme::GOOD))
     }
@@ -708,7 +728,7 @@ fn state_color(worktree: &Worktree) -> Color {
     if worktree.prunable {
         theme::WARN
     } else if worktree.detached || worktree.bare {
-        theme::ACCENT_ALT
+        theme::ACCENT
     } else {
         theme::GOOD
     }
@@ -775,9 +795,6 @@ fn render_mode(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
             );
         }
         Mode::ConfirmRemove { path, branch } => {
-            let popup = centered_rect(64, 9, area);
-            render_shadow(frame, popup);
-            frame.render_widget(Clear, popup);
             let lines = vec![
                 Line::from(""),
                 Line::from(Span::styled(
@@ -798,40 +815,22 @@ fn render_mode(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
                     ),
                 ]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled(
-                        "y",
-                        Style::default()
-                            .fg(theme::GOOD)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" confirm    ", Style::default().fg(theme::MUTED)),
-                    Span::styled(
-                        "n",
-                        Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" cancel", Style::default().fg(theme::MUTED)),
-                ]),
+                confirm_action_line(),
             ];
-            let paragraph = Paragraph::new(lines)
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(theme::BAD))
-                        .title(Span::styled(
-                            " Confirm remove ",
-                            Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
-                        )),
-                )
-                .wrap(Wrap { trim: false });
-            frame.render_widget(paragraph, popup);
+            render_confirmation_popup(
+                frame,
+                area,
+                ConfirmationPopup {
+                    width_percent: 64,
+                    height: 9,
+                    title: "Confirm remove",
+                    border_color: theme::BAD,
+                    lines,
+                    wrap: true,
+                },
+            );
         }
         Mode::ConfirmPrune => {
-            let popup = centered_rect(56, 7, area);
-            render_shadow(frame, popup);
-            frame.render_widget(Clear, popup);
             let lines = vec![
                 Line::from(""),
                 Line::from(Span::styled(
@@ -841,36 +840,44 @@ fn render_mode(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<'_>) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled(
-                        "y",
-                        Style::default()
-                            .fg(theme::GOOD)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" confirm    ", Style::default().fg(theme::MUTED)),
-                    Span::styled(
-                        "n",
-                        Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" cancel", Style::default().fg(theme::MUTED)),
-                ]),
+                confirm_action_line(),
             ];
-            let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(theme::WARN))
-                    .title(Span::styled(
-                        " Confirm prune ",
-                        Style::default()
-                            .fg(theme::WARN)
-                            .add_modifier(Modifier::BOLD),
-                    )),
+            render_confirmation_popup(
+                frame,
+                area,
+                ConfirmationPopup {
+                    width_percent: 56,
+                    height: 7,
+                    title: "Confirm prune",
+                    border_color: theme::WARN,
+                    lines,
+                    wrap: false,
+                },
             );
-            frame.render_widget(paragraph, popup);
         }
     }
+}
+
+struct ConfirmationPopup {
+    width_percent: u16,
+    height: u16,
+    title: &'static str,
+    border_color: Color,
+    lines: Vec<Line<'static>>,
+    wrap: bool,
+}
+
+fn render_confirmation_popup(frame: &mut ratatui::Frame<'_>, area: Rect, popup: ConfirmationPopup) {
+    let popup_area = clear_popup_area(frame, area, popup.width_percent, popup.height);
+    let paragraph = Paragraph::new(popup.lines)
+        .alignment(Alignment::Center)
+        .block(popup_block(popup.title, popup.border_color));
+    let paragraph = if popup.wrap {
+        paragraph.wrap(Wrap { trim: false })
+    } else {
+        paragraph
+    };
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn render_prompt(
@@ -880,9 +887,7 @@ fn render_prompt(
     input: &str,
     default: Option<&str>,
 ) {
-    let popup = centered_rect(70, 8, area);
-    render_shadow(frame, popup);
-    frame.render_widget(Clear, popup);
+    let popup = clear_popup_area(frame, area, 70, 8);
 
     let mut lines = vec![
         Line::from(""),
@@ -908,35 +913,65 @@ fn render_prompt(
         Span::styled(
             "↵",
             Style::default()
-                .fg(theme::ACCENT_ALT)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" accept    ", Style::default().fg(theme::MUTED)),
         Span::styled(
             "esc",
             Style::default()
-                .fg(theme::ACCENT_ALT)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" cancel", Style::default().fg(theme::MUTED)),
     ]));
 
     let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme::ACCENT))
-                .padding(Padding::horizontal(1))
-                .title(Span::styled(
-                    format!(" {title} "),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
+        .block(popup_block(title, theme::ACCENT).padding(Padding::horizontal(1)))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, popup);
+}
+
+fn clear_popup_area(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    percent_x: u16,
+    height: u16,
+) -> Rect {
+    let popup = centered_rect(percent_x, height, area);
+    render_shadow(frame, popup);
+    frame.render_widget(Clear, popup);
+    popup
+}
+
+fn popup_block(title: &str, border_color: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+}
+
+fn confirm_action_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "y",
+            Style::default()
+                .fg(theme::GOOD)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" confirm    ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            "n",
+            Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(theme::MUTED)),
+    ])
 }
 
 /// Draw a soft drop-shadow one cell down-right of the popup for depth.

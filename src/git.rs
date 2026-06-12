@@ -258,12 +258,7 @@ fn run_git<'a>(repo: &Repo, args: impl IntoIterator<Item = &'a str>) -> AppResul
     if output.status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(AppError::new(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )))
+        Err(git_failure(&args, &output.stderr))
     }
 }
 
@@ -280,15 +275,15 @@ fn capture_git<'a>(
 
     let output = command.output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::new(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
+        return Err(git_failure(&args, &output.stderr));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_failure(args: &[&str], stderr: &[u8]) -> AppError {
+    let stderr = String::from_utf8_lossy(stderr);
+    AppError::new(format!("git {} failed: {}", args.join(" "), stderr.trim()))
 }
 
 fn status_to_bool(status: ExitStatus, command: &str) -> AppResult<bool> {
@@ -328,49 +323,54 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 
     for line in output.lines() {
         if line.is_empty() {
-            if let Some(worktree) = current.take() {
-                worktrees.push(worktree);
-            }
+            finish_current_worktree(&mut current, &mut worktrees);
             continue;
         }
 
         if let Some(path) = line.strip_prefix("worktree ") {
-            if let Some(worktree) = current.take() {
-                worktrees.push(worktree);
-            }
-            current = Some(Worktree {
-                path: PathBuf::from(path),
-                head: None,
-                branch: None,
-                bare: false,
-                detached: false,
-                prunable: false,
-            });
+            finish_current_worktree(&mut current, &mut worktrees);
+            current = Some(new_worktree(path));
             continue;
         }
 
-        let Some(worktree) = current.as_mut() else {
-            continue;
-        };
-
-        if let Some(head) = line.strip_prefix("HEAD ") {
-            worktree.head = Some(head.to_owned());
-        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-            worktree.branch = Some(branch.to_owned());
-        } else if line == "bare" {
-            worktree.bare = true;
-        } else if line == "detached" {
-            worktree.detached = true;
-        } else if line.starts_with("prunable") {
-            worktree.prunable = true;
+        if let Some(worktree) = current.as_mut() {
+            apply_worktree_field(worktree, line);
         }
     }
 
-    if let Some(worktree) = current {
+    finish_current_worktree(&mut current, &mut worktrees);
+    worktrees
+}
+
+fn finish_current_worktree(current: &mut Option<Worktree>, worktrees: &mut Vec<Worktree>) {
+    if let Some(worktree) = current.take() {
         worktrees.push(worktree);
     }
+}
 
-    worktrees
+fn new_worktree(path: &str) -> Worktree {
+    Worktree {
+        path: PathBuf::from(path),
+        head: None,
+        branch: None,
+        bare: false,
+        detached: false,
+        prunable: false,
+    }
+}
+
+fn apply_worktree_field(worktree: &mut Worktree, line: &str) {
+    if let Some(head) = line.strip_prefix("HEAD ") {
+        worktree.head = Some(head.to_owned());
+    } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+        worktree.branch = Some(branch.to_owned());
+    } else if line == "bare" {
+        worktree.bare = true;
+    } else if line == "detached" {
+        worktree.detached = true;
+    } else if line.starts_with("prunable") {
+        worktree.prunable = true;
+    }
 }
 
 #[cfg(test)]
