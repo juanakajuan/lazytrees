@@ -661,13 +661,6 @@ fn render_worktree_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Tui
                 &worktree_state(worktree),
                 state_color(worktree),
             ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "─".repeat(area.width.saturating_sub(4) as usize),
-                Style::default().fg(theme::FAINT),
-            )),
-            Line::from(""),
-            detail_row("", "open", "tmux", theme::GOOD),
         ],
         None => vec![
             Line::from(""),
